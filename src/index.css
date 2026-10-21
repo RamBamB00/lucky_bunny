@@ -1,0 +1,114 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Палитра Lucky Bunny: тёплый крем, шалфей, коралл, графит.
+       primary затемнён (контраст ссылок/полосы ≥ 5:1), destructive затемнён под текст ошибок,
+       input-рамка темнее, чтобы поля были видны на кремовом фоне. */
+    --background: 36 50% 93%;
+    --foreground: 30 12% 16%;
+    --card: 43 50% 98%;
+    --card-foreground: 30 12% 16%;
+    --popover: 43 50% 98%;
+    --popover-foreground: 30 12% 16%;
+    --primary: 160 25% 34%;
+    --primary-foreground: 40 60% 96%;
+    --secondary: 138 46% 84%;
+    --secondary-foreground: 30 12% 16%;
+    --muted: 35 36% 89%;
+    --muted-foreground: 30 9% 42%;
+    --accent: 6 66% 88%;
+    --accent-foreground: 30 12% 16%;
+    --destructive: 4 62% 42%;
+    --destructive-foreground: 40 60% 96%;
+    --border: 33 22% 84%;
+    --input: 33 20% 70%;
+    --ring: 160 25% 34%;
+    --radius: 1rem;
+    --sidebar-background: 43 50% 98%;
+    --sidebar-foreground: 30 12% 16%;
+    --sidebar-primary: 160 25% 34%;
+    --sidebar-primary-foreground: 40 60% 96%;
+    --sidebar-accent: 35 36% 89%;
+    --sidebar-accent-foreground: 30 12% 16%;
+    --sidebar-border: 33 22% 84%;
+    --sidebar-ring: 160 25% 34%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-size: 16px;
+    line-height: 1.6;
+  }
+
+  h1, h2, h3, .font-display {
+    font-family: 'Dela Gothic One', sans-serif;
+    font-weight: 400;
+    line-height: 1.25;
+    letter-spacing: 0.01em;
+  }
+
+  :focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+    html { scroll-behavior: auto; }
+  }
+}
+
+@layer components {
+  .container-lb {
+    @apply mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8;
+  }
+  .btn-press {
+    @apply transition-all duration-200 active:scale-[0.97];
+  }
+  .card-lb {
+    @apply bg-card rounded-2xl border border-border/60 shadow-[0_2px_12px_rgba(46,42,37,0.06)];
+  }
+  .badge-sticker {
+    @apply inline-flex items-center rounded-full px-3 py-1 text-xs font-bold uppercase tracking-wide border-2;
+  }
+}
+
+/* Тонкая бумажная текстура фона */
+.paper-bg {
+  background-color: hsl(var(--background));
+  background-image: radial-gradient(hsl(33 22% 84% / 0.35) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+
+/* Появление секций при скролле */
+.reveal {
+  opacity: 0;
+  transform: translateY(18px);
+  transition: opacity 0.5s ease-out, transform 0.5s ease-out;
+}
+.reveal.is-visible {
+  opacity: 1;
+  transform: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .reveal { opacity: 1; transform: none; }
+}
+
+/* Скроллбар для горизонтальных лент */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
