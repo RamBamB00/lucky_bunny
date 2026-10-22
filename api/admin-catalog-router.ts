@@ -182,93 +182,259 @@ export const adminCatalogRouter = createRouter({
     return [header, ...lines].join("\n");
   }),
 
-  // Импорт каталога из CSV (разделитель «;» или «,», первая строка — заголовок)
+  // Импорт каталога из CSV: создаёт книги, обновляет существующие по ISBN,
+  // сам создаёт недостающие категории и возвращает подробный отчёт.
   importBooks: adminQuery
-    .input(z.object({ csv: z.string().min(1).max(5_000_000) }))
+    .input(z.object({ csv: z.string().min(1).max(10_000_000) }))
     .mutation(async ({ ctx, input }) => {
       const db = getDb();
-      const rows = parseCsv(input.csv);
-      if (rows.length < 2) throw new TRPCError({ code: "BAD_REQUEST", message: "CSV пуст или без данных" });
-      const header = rows[0].map((h) => h.trim().toLowerCase());
-      const col = (name: string) => header.indexOf(name);
+      const text = input.csv.replace(/^\uFEFF/, "");
+      const delimiter = detectDelimiter(text);
+      const rows = parseCsv(text, delimiter);
+      if (rows.length < 2) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Файл пуст или в нём только строка заголовков" });
+      }
+      if (rows.length - 1 > IMPORT_MAX_ROWS) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: `Слишком много строк (${rows.length - 1}). За один раз можно загрузить не более ${IMPORT_MAX_ROWS}.`,
+        });
+      }
 
-      const report = { created: 0, updated: 0, errors: [] as string[] };
+      // Сопоставляем заголовки столбцов с полями (русские и английские названия)
+      const colIndex = new Map<ImportField, number>();
+      const ignoredColumns: string[] = [];
+      rows[0].forEach((h, idx) => {
+        const field = HEADER_TO_FIELD.get(normHeader(h));
+        if (field) {
+          if (!colIndex.has(field)) colIndex.set(field, idx);
+        } else if (h.trim()) {
+          ignoredColumns.push(h.trim());
+        }
+      });
+      if (!colIndex.has("title") && !colIndex.has("isbn")) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Не найден столбец «title» (название). Скачайте шаблон CSV и сверьтесь с заголовками.",
+        });
+      }
+
+      const report = {
+        total: 0,
+        created: 0,
+        updated: 0,
+        skipped: 0,
+        categoriesCreated: [] as string[],
+        ignoredColumns,
+        errors: [] as { row: number; message: string }[],
+      };
+
+      // Кэш категорий и ISBN, чтобы не ходить в БД на каждую строку
       const cats = await db.select().from(categories);
-      const catByName = new Map(cats.map((c) => [c.name.toLowerCase(), c.id]));
+      const catByName = new Map(cats.map((c) => [c.name.trim().toLowerCase(), c.id]));
+      const catBySlug = new Map(cats.map((c) => [c.slug, c.id]));
+      const existingBooks = await db.select({ id: books.id, isbn: books.isbn }).from(books);
+      const bookByIsbn = new Map<string, number>();
+      for (const b of existingBooks) {
+        if (b.isbn) bookByIsbn.set(normIsbn(b.isbn), b.id);
+      }
 
       for (let i = 1; i < rows.length; i++) {
         const r = rows[i];
-        if (r.length === 0 || r.every((c) => !c.trim())) continue;
-        const rowNum = i + 1;
+        if (r.every((c) => !c.trim())) continue; // пустая строка
+        report.total += 1;
+        const rowNum = i + 1; // как в Excel: строка 1 — заголовок
         try {
-          const get = (name: string) => {
-            const idx = col(name);
-            return idx >= 0 ? (r[idx] ?? "").trim() : "";
+          const cell = (f: ImportField) => {
+            const idx = colIndex.get(f);
+            return idx === undefined ? undefined : (r[idx] ?? "").trim();
           };
-          const title = get("title") || get("название");
-          if (!title) throw new Error("нет названия");
-          const isbn = get("isbn") || null;
-          const priceRetail = parseInt(get("priceretail") || get("розничная цена"), 10);
-          if (!Number.isFinite(priceRetail)) throw new Error("нет розничной цены");
-          const num = (v: string) => {
-            const n = parseInt(v, 10);
-            return Number.isFinite(n) ? n : null;
+          const filled = (f: ImportField) => (cell(f) ?? "") !== "";
+
+          // ISBN
+          const rawIsbn = cell("isbn") ?? "";
+          if (/^\d+([.,]\d+)?e\+?\d+$/i.test(rawIsbn)) {
+            throw new Error(
+              `ISBN «${rawIsbn}» испорчен Excel (научная запись). Задайте столбцу ISBN текстовый формат и введите заново`,
+            );
+          }
+          const isbn = rawIsbn ? normIsbn(rawIsbn) : "";
+          const existingId = isbn ? bookByIsbn.get(isbn) : undefined;
+
+          // Собираем значения только из тех столбцов, что есть в файле
+          const patch: Record<string, unknown> = {};
+          const setStr = (f: ImportField) => {
+            if (filled(f)) patch[f] = cell(f);
+          };
+          const setInt = (f: ImportField, label: string) => {
+            if (!filled(f)) return;
+            const n = toInt(cell(f)!);
+            if (n === null) throw new Error(`«${label}»: «${cell(f)}» — не число`);
+            patch[f] = n;
+          };
+          const setBool = (f: ImportField, label: string) => {
+            if (!filled(f)) return;
+            const b = toBool(cell(f)!);
+            if (b === null) throw new Error(`«${label}»: «${cell(f)}» — ожидалось да/нет`);
+            patch[f] = b;
           };
 
-          const categoryName = get("category") || get("категория");
-          let categoryId: number | null = null;
+          setStr("title");
+          setStr("author");
+          setStr("publisher");
+          setStr("description");
+          setStr("language");
+          setStr("binding");
+          setStr("ageGroup");
+          setStr("coverUrl");
+          setInt("year", "Год");
+          setInt("pages", "Страниц");
+          setInt("priceRetail", "Розничная цена");
+          setInt("priceWholesale", "Оптовая цена");
+          setInt("wholesaleMinQty", "Мин. кол-во для опта");
+          setInt("salePrice", "Цена со скидкой");
+          setInt("stock", "Остаток");
+          setBool("isNew", "Новинка");
+          setBool("isBestseller", "Бестселлер");
+          setBool("isRecommended", "Рекомендуем");
+          setBool("isActive", "Активна");
+
+          // Категория: ищем по названию, иначе создаём
+          const categoryName = cell("category") ?? "";
           if (categoryName) {
-            const found = catByName.get(categoryName.toLowerCase());
-            if (found) categoryId = found;
-            else {
-              const [{ id }] = await db
+            const key = categoryName.toLowerCase();
+            const slug = slugify(categoryName);
+            let id = catByName.get(key) ?? catBySlug.get(slug);
+            if (!id) {
+              const [{ id: newId }] = await db
                 .insert(categories)
-                .values({ name: categoryName, slug: slugify(categoryName) })
+                .values({ name: categoryName.slice(0, 255), slug: slug.slice(0, 255) })
                 .$returningId();
-              catByName.set(categoryName.toLowerCase(), id);
-              categoryId = id;
+              id = newId;
+              report.categoriesCreated.push(categoryName);
+              catBySlug.set(slug, id);
             }
+            catByName.set(key, id);
+            patch.categoryId = id;
           }
 
-          const data = {
-            isbn,
-            title,
-            author: get("author") || get("автор") || null,
-            publisher: get("publisher") || get("издательство") || null,
-            categoryId,
-            language: get("language") || get("язык") || null,
-            year: num(get("year") || get("год")),
-            description: get("description") || get("описание") || null,
-            priceRetail,
-            priceWholesale: num(get("pricewholesale") || get("оптовая цена")),
-            wholesaleMinQty: num(get("wholesaleminqty") || get("мин. опт. кол-во")),
-            stock: num(get("stock") || get("остаток")) ?? 0,
-            coverUrl: get("coverurl") || get("обложка") || null,
-          };
-
-          if (isbn) {
-            const existing = await db.select({ id: books.id }).from(books).where(eq(books.isbn, isbn)).limit(1).then((x) => x.at(0));
-            if (existing) {
-              await db.update(books).set(data).where(eq(books.id, existing.id));
-              report.updated += 1;
+          if (existingId !== undefined) {
+            // ---- обновление существующей книги (по ISBN) ----
+            // Пустые ячейки не затирают уже сохранённые данные.
+            if (Object.keys(patch).length === 0) {
+              report.skipped += 1;
               continue;
             }
+            const parsed = bookInput.partial().safeParse(patch);
+            if (!parsed.success) throw new Error(formatZod(parsed.error));
+            // zod подставляет значения по умолчанию даже в partial() — оставляем только то, что было в файле
+            const changes = Object.fromEntries(Object.entries(parsed.data).filter(([k]) => k in patch));
+            await db.update(books).set(changes).where(eq(books.id, existingId));
+            report.updated += 1;
+          } else {
+            // ---- создание новой книги ----
+            if (!patch.title) throw new Error("не указано название");
+            if (patch.priceRetail === undefined) throw new Error("не указана розничная цена");
+            const parsed = bookInput.safeParse({ ...patch, isbn: isbn || null });
+            if (!parsed.success) throw new Error(formatZod(parsed.error));
+            const slug = await uniqueSlug(parsed.data.title);
+            const [{ id }] = await db
+              .insert(books)
+              .values({ ...parsed.data, slug })
+              .$returningId();
+            if (isbn) bookByIsbn.set(isbn, id);
+            report.created += 1;
           }
-          const slug = await uniqueSlug(title);
-          await db.insert(books).values({ ...data, slug });
-          report.created += 1;
         } catch (e) {
-          report.errors.push(`Строка ${rowNum}: ${e instanceof Error ? e.message : "ошибка"}`);
+          report.errors.push({ row: rowNum, message: e instanceof Error ? e.message : "ошибка" });
         }
       }
 
-      await logAdminAction(ctx.user, "book.import", `создано ${report.created}, обновлено ${report.updated}, ошибок ${report.errors.length}`);
+      await logAdminAction(
+        ctx.user,
+        "book.import",
+        `строк ${report.total}: создано ${report.created}, обновлено ${report.updated}, ошибок ${report.errors.length}, новых категорий ${report.categoriesCreated.length}`,
+      );
       return report;
     }),
 });
 
-// Простой CSV-парсер с поддержкой кавычек и ;/, разделителей
-function parseCsv(text: string): string[][] {
+// ---------- Вспомогательные функции импорта ----------
+
+const IMPORT_MAX_ROWS = 5000;
+
+type ImportField =
+  | "isbn" | "title" | "author" | "publisher" | "category" | "language" | "year" | "pages"
+  | "binding" | "ageGroup" | "description" | "priceRetail" | "priceWholesale" | "wholesaleMinQty"
+  | "salePrice" | "stock" | "coverUrl" | "isNew" | "isBestseller" | "isRecommended" | "isActive";
+
+const normHeader = (h: string) => h.replace(/^\uFEFF/, "").trim().toLowerCase().replace(/\s+/g, " ").replace(/ё/g, "е");
+
+const FIELD_ALIASES: Record<ImportField, string[]> = {
+  isbn: ["isbn", "исбн"],
+  title: ["title", "название", "наименование"],
+  author: ["author", "автор"],
+  publisher: ["publisher", "издательство"],
+  category: ["category", "категория"],
+  language: ["language", "язык"],
+  year: ["year", "год", "год издания"],
+  pages: ["pages", "страниц", "страницы", "кол-во страниц"],
+  binding: ["binding", "переплет"],
+  ageGroup: ["agegroup", "возраст", "возрастная группа"],
+  description: ["description", "описание"],
+  priceRetail: ["priceretail", "розничная цена", "цена"],
+  priceWholesale: ["pricewholesale", "оптовая цена"],
+  wholesaleMinQty: ["wholesaleminqty", "мин. опт. кол-во", "мин. кол-во для опта"],
+  salePrice: ["saleprice", "цена со скидкой", "акционная цена"],
+  stock: ["stock", "остаток", "количество"],
+  coverUrl: ["coverurl", "обложка", "url обложки"],
+  isNew: ["isnew", "новинка"],
+  isBestseller: ["isbestseller", "бестселлер"],
+  isRecommended: ["isrecommended", "рекомендуем"],
+  isActive: ["isactive", "активна"],
+};
+
+const HEADER_TO_FIELD = new Map<string, ImportField>(
+  (Object.entries(FIELD_ALIASES) as [ImportField, string[]][]).flatMap(([field, names]) =>
+    names.map((n) => [normHeader(n), field] as [string, ImportField]),
+  ),
+);
+
+const normIsbn = (s: string) => s.replace(/[\s-]/g, "").toUpperCase();
+
+// «1 200», «1200,00», «1 200 ₸» → 1200
+function toInt(v: string): number | null {
+  const cleaned = v.replace(/[\s\u00A0₸]|тг\.?/gi, "").replace(",", ".");
+  if (!/^-?\d+(\.\d+)?$/.test(cleaned)) return null;
+  return Math.round(Number(cleaned));
+}
+
+function toBool(v: string): boolean | null {
+  const s = v.trim().toLowerCase();
+  if (["1", "true", "yes", "y", "да", "д", "+"].includes(s)) return true;
+  if (["0", "false", "no", "n", "нет", "н", "-"].includes(s)) return false;
+  return null;
+}
+
+function formatZod(err: z.ZodError): string {
+  return err.issues.map((i) => `«${i.path.join(".") || "строка"}»: ${i.message}`).join("; ");
+}
+
+// Разделитель определяем по строке заголовков: «;», «,» или табуляция
+function detectDelimiter(text: string): string {
+  const firstLine = text.split(/\r?\n/, 1)[0] ?? "";
+  const counts = { ";": 0, ",": 0, "\t": 0 };
+  let inQuotes = false;
+  for (const ch of firstLine) {
+    if (ch === '"') inQuotes = !inQuotes;
+    else if (!inQuotes && ch in counts) counts[ch as keyof typeof counts] += 1;
+  }
+  const best = (Object.entries(counts) as [string, number][]).sort((a, b) => b[1] - a[1])[0];
+  return best[1] > 0 ? best[0] : ";";
+}
+
+// CSV-парсер с поддержкой кавычек, переносов строк внутри ячеек и одного разделителя
+function parseCsv(text: string, delimiter: string): string[][] {
   const rows: string[][] = [];
   let row: string[] = [];
   let field = "";
@@ -283,9 +449,9 @@ function parseCsv(text: string): string[][] {
         else inQuotes = false;
       } else field += ch;
     } else if (ch === '"') inQuotes = true;
-    else if (ch === ";" || ch === ",") pushField();
+    else if (ch === delimiter) pushField();
     else if (ch === "\n") pushRow();
-    else if (ch === "\r") { /* skip */ }
+    else if (ch === "\r") { /* пропускаем */ }
     else field += ch;
   }
   if (field !== "" || row.length > 0) pushRow();

@@ -1,11 +1,13 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { toast } from "sonner";
-import { Pencil, Plus, Trash2 } from "lucide-react";
+import { Download, Pencil, Plus, Trash2, Upload } from "lucide-react";
 import { trpc } from "@/providers/trpc";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { formatPrice } from "@/lib/format";
 import { AGE_GROUPS, BINDINGS, LANGUAGES } from "@contracts/shop";
+import { downloadBookCsvTemplate } from "@/lib/book-csv";
+import ImportBooksDialog from "./ImportBooksDialog";
 
 type Tier = { minQty: number; price: number };
 
@@ -239,6 +241,7 @@ export default function AdminBooks() {
   const [page, setPage] = useState(1);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editId, setEditId] = useState<number | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
   const utils = trpc.useUtils();
 
   const { data, isLoading } = trpc.adminCatalog.listBooks.useQuery({ search: search || undefined, page, pageSize: 20 });
@@ -257,9 +260,17 @@ export default function AdminBooks() {
     <div>
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl">Товары</h1>
-        <Button className="rounded-full" onClick={() => { setEditId(null); setEditorOpen(true); }}>
-          <Plus className="mr-1 h-4 w-4" /> Добавить книгу
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" className="rounded-full" onClick={downloadBookCsvTemplate}>
+            <Download className="mr-1 h-4 w-4" /> Скачать шаблон CSV
+          </Button>
+          <Button variant="outline" className="rounded-full" onClick={() => setImportOpen(true)}>
+            <Upload className="mr-1 h-4 w-4" /> Импорт из CSV
+          </Button>
+          <Button className="rounded-full" onClick={() => { setEditId(null); setEditorOpen(true); }}>
+            <Plus className="mr-1 h-4 w-4" /> Добавить книгу
+          </Button>
+        </div>
       </div>
 
       <input
@@ -344,6 +355,8 @@ export default function AdminBooks() {
           <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage(page + 1)}>Вперёд</Button>
         </div>
       )}
+
+      <ImportBooksDialog open={importOpen} onClose={() => setImportOpen(false)} />
 
       <BookEditor
         open={editorOpen}

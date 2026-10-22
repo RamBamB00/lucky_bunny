@@ -4,6 +4,7 @@ import { Download, Upload } from "lucide-react";
 import { trpc } from "@/providers/trpc";
 import { Button } from "@/components/ui/button";
 import { formatDateTime } from "@/lib/format";
+import { readCsvFile } from "@/lib/book-csv";
 
 function TextSetting({ label, skey, values, setValues, multiline }: {
   label: string; skey: string; values: Record<string, string>;
@@ -79,7 +80,7 @@ export default function AdminSettings() {
   const exportBooks = trpc.adminCatalog.exportBooks.useQuery(undefined, { enabled: false });
 
   const onImportFile = async (file: File) => {
-    const text = await file.text();
+    const text = await readCsvFile(file);
     importCsv.mutate({ csv: text });
   };
 
@@ -150,7 +151,7 @@ export default function AdminSettings() {
       <section className="card-lb mt-6 p-5">
         <h2 className="mb-3 text-lg">Импорт / экспорт каталога</h2>
         <p className="mb-3 text-xs text-muted-foreground">
-          CSV с разделителем «;»: isbn;title;author;publisher;category;language;year;description;priceRetail;priceWholesale;wholesaleMinQty;stock;coverUrl.
+          Удобнее импортировать на странице «Товары» (кнопка «Импорт из CSV», там же шаблон файла).
           Книги с существующим ISBN обновляются, остальные создаются. Отчёт об ошибках показывается после импорта.
         </p>
         <div className="flex flex-wrap gap-2">
@@ -165,7 +166,7 @@ export default function AdminSettings() {
         </div>
         {importCsv.data && importCsv.data.errors.length > 0 && (
           <ul className="mt-3 max-h-40 space-y-1 overflow-y-auto rounded-xl bg-muted p-3 text-xs text-destructive">
-            {importCsv.data.errors.map((e, i) => <li key={i}>{e}</li>)}
+            {importCsv.data.errors.map((e, i) => <li key={i}>Строка {e.row}: {e.message}</li>)}
           </ul>
         )}
       </section>
